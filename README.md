@@ -12,6 +12,28 @@ pane they belong to.
 
 ![neorex demo](assets/demo.gif)
 
+## This fork
+
+This is a fork of [alexrlocke/neorex](https://github.com/alexrlocke/neorex).
+Its `main` is upstream's `main` plus these changes:
+
+| Change | Why | Where |
+|---|---|---|
+| [Remembered pane widths](#remembered-pane-widths) | Upstream opens every split at half of the pane it splits, so a sidebar such as the snacks explorer takes half the screen each time it opens. Snacks itself doesn't keep a width you dragged. | `src/nvim/windows.lua`, `src/daemon/WindowChanges.zig`, `src/daemon/Daemon.zig` |
+
+To take upstream's changes:
+
+```sh
+git remote add upstream https://github.com/alexrlocke/neorex.git  # once
+git fetch upstream
+git switch main
+git merge upstream/main
+zig build test && zig build -Doptimize=ReleaseSafe
+git push origin main
+```
+
+Restart neorex after a build: a running neorex keeps the old binary.
+
 ## Status
 
 Very early and rough, bugs / missing features are to be expected.
