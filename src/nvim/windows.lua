@@ -46,6 +46,73 @@ local sizes = {}
 -- statusline formats we've set, to tell them from ones the user set
 local ours = {}
 
+-- Pane widths kept across sessions, per filetype: the width the user last gave
+-- such a window's pane in Rex. vim.g.neorex_remember_width lists the filetypes
+-- (default: the box of a snacks sidebar, such as the explorer's), and
+-- vim.g.neorex_widths_file says where the widths are kept.
+local function remembered(ft)
+  return ft ~= '' and vim.tbl_contains(vim.g.neorex_remember_width or { 'snacks_layout_box' }, ft)
+end
+
+local function widths_file()
+  return vim.g.neorex_widths_file or (vim.fn.stdpath('state') .. '/neorex/widths.json')
+end
+
+-- read each time: other neorex instances write it too
+local function read_widths()
+  local ok, lines = pcall(vim.fn.readfile, widths_file())
+  if not ok or #lines == 0 then return {} end
+  local decoded, t = pcall(vim.json.decode, table.concat(lines, '\n'))
+  return decoded and type(t) == 'table' and t or {}
+end
+
+local function save_width(ft, w)
+  local t = read_widths()
+  if t[ft] == w then return end
+  t[ft] = w
+  local path = widths_file()
+  pcall(vim.fn.mkdir, vim.fs.dirname(path), 'p')
+  pcall(vim.fn.writefile, { vim.json.encode(t) }, path)
+end
+
+-- window -> the width asked for its new pane, until the pane's first size
+local asked = {}
+
+-- a new window with a remembered filetype: tell the daemon its pane's width,
+-- before the redraw that shows the window
+local function ask_width(buf)
+  local ft = vim.bo[buf].filetype
+  if not remembered(ft) then return end
+  local w = tonumber(read_widths()[ft])
+  if not w or w < 1 then return end
+  for _, win in ipairs(vim.fn.win_findbuf(buf)) do
+    if not asked[win] and shown(win) and not api.nvim_win_get_config(win).external then
+      asked[win] = math.floor(w)
+      vim.rpcnotify(chan, 'neorex_width', win, asked[win])
+    end
+  end
+end
+api.nvim_create_autocmd({ 'BufWinEnter', 'FileType' }, {
+  group = group,
+  callback = function(ev) ask_width(ev.buf) end,
+})
+api.nvim_create_autocmd('WinClosed', {
+  group = group,
+  callback = function(ev) asked[tonumber(ev.match)] = nil end,
+})
+
+-- A remembered window's pane got a new width: keep it. The first change of a
+-- pane opened at a kept width only answers it, a column or two off, so it
+-- isn't kept: the width would creep. (A refit sends the same width again.)
+local function keep_width(win, prev, w)
+  if not prev or prev == w then return end
+  local want = asked[win]
+  asked[win] = nil
+  if want and math.abs(w - want) <= 2 then return end
+  local ft = vim.bo[api.nvim_win_get_buf(win)].filetype
+  if remembered(ft) then save_width(ft, w) end
+end
+
 local function local_stl(win)
   return api.nvim_get_option_value('statusline', { win = win, scope = 'local' })
 end
@@ -67,6 +134,7 @@ end
 --- Sizes external `win` to fill `w` x `h`, statusline included.
 function M.size(win, w, h)
   if not shown(win) then return end
+  keep_width(win, sizes[win] and sizes[win][1], w)
   sizes[win] = { w, h }
   give_statusline(win)
   local th = text_height(win, h)

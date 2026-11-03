@@ -86,6 +86,18 @@ return {
 
 Plugins that set their own RGB colors keep them.
 
+## Remembered pane widths
+
+A window whose filetype is in `vim.g.neorex_remember_width` opens its pane
+at the width you last gave such a pane, so a sidebar keeps the width you
+dragged it to, across sessions. The default is `{ "snacks_layout_box" }`:
+the box of a snacks sidebar, such as the explorer's. neorex keeps the widths
+in `stdpath("state")/neorex/widths.json`, or in `vim.g.neorex_widths_file`.
+
+```lua
+vim.g.neorex_remember_width = { "snacks_layout_box", "neo-tree" }
+```
+
 ## Current limitations
 
 - The `<C-w>` resize, swap and move commands do nothing. Use Rex's own pane

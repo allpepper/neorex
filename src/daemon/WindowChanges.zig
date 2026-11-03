@@ -17,12 +17,16 @@ closing: std.AutoArrayHashMapUnmanaged(i64, void) = .empty,
 reopening: std.AutoArrayHashMapUnmanaged(i64, void) = .empty,
 /// New windows without panes yet, and where Neovim put them.
 splits: std.AutoArrayHashMapUnmanaged(i64, windows.Split) = .empty,
+/// New windows without panes yet, and the width, in columns, their
+/// filetype's pane had last (windows.lua, `neorex_remember_width`).
+widths: std.AutoArrayHashMapUnmanaged(i64, u32) = .empty,
 
 pub fn deinit(self: *WindowChanges, gpa: Allocator) void {
     self.asked.deinit(gpa);
     self.closing.deinit(gpa);
     self.reopening.deinit(gpa);
     self.splits.deinit(gpa);
+    self.widths.deinit(gpa);
     self.* = undefined;
 }
 
@@ -39,6 +43,11 @@ pub fn forgetGone(self: *WindowChanges, grids: *const Grids) void {
     while (j > 0) {
         j -= 1;
         if (grids.gridOf(self.splits.keys()[j]) == null) self.splits.swapRemoveAt(j);
+    }
+    j = self.widths.count();
+    while (j > 0) {
+        j -= 1;
+        if (grids.gridOf(self.widths.keys()[j]) == null) self.widths.swapRemoveAt(j);
     }
 }
 
@@ -82,6 +91,27 @@ pub fn splitOf(self: *const WindowChanges, win: i64) windows.Split {
 
 pub fn forgetSplit(self: *WindowChanges, win: i64) void {
     _ = self.splits.swapRemove(win);
+    _ = self.widths.swapRemove(win);
+}
+
+pub fn noteWidth(self: *WindowChanges, gpa: Allocator, win: i64, cols: u32) !void {
+    try self.widths.put(gpa, win, cols);
+}
+
+/// The width `win`'s pane should open at, or null for half of the pane it splits.
+pub fn widthOf(self: *const WindowChanges, win: i64) ?u32 {
+    return self.widths.get(win);
+}
+
+/// Rex's `ratio` for a new pane `cols` wide beside an anchor `anchor_cols`
+/// wide: the share of the anchor's space the before part gets, so the pane
+/// opens at its remembered width. Null (an even split) without a width, for
+/// one above the other, or without the anchor's size.
+pub fn splitRatio(cols: ?u32, anchor_cols: u32, side_by_side: bool, before: bool) ?f64 {
+    const want = cols orelse return null;
+    if (!side_by_side or anchor_cols == 0) return null;
+    const share = std.math.clamp(@as(f64, @floatFromInt(want)) / @as(f64, @floatFromInt(anchor_cols)), 0.05, 0.95);
+    return if (before) share else 1 - share;
 }
 
 const testing = std.testing;
@@ -132,4 +162,33 @@ test "forgets windows Neovim no longer has" {
     try testing.expect(changes.takeReopening(1000));
     try testing.expect(!changes.takeReopening(1001));
     try testing.expectEqual(@as(usize, 1), changes.splits.count());
+}
+
+test "a new window's remembered width, until its pane is made or it's gone" {
+    var grids: Grids = .{};
+    defer grids.deinit(testing.allocator);
+    try grids.wins.put(testing.allocator, 2, .{ .win = 1000, .kind = .ordinary });
+    var changes: WindowChanges = .{};
+    defer changes.deinit(testing.allocator);
+    try testing.expectEqual(@as(?u32, null), changes.widthOf(1000));
+    try changes.noteWidth(testing.allocator, 1000, 40);
+    try changes.noteWidth(testing.allocator, 1001, 30);
+    try testing.expectEqual(@as(?u32, 40), changes.widthOf(1000));
+    changes.forgetGone(&grids);
+    try testing.expectEqual(@as(?u32, null), changes.widthOf(1001));
+    changes.forgetSplit(1000);
+    try testing.expectEqual(@as(?u32, null), changes.widthOf(1000));
+}
+
+test "split ratio: the before part's share of the anchor for a remembered width" {
+    // no width, a vertical split, or no anchor size: Rex's even split
+    try testing.expectEqual(@as(?f64, null), splitRatio(null, 100, true, true));
+    try testing.expectEqual(@as(?f64, null), splitRatio(30, 100, false, true));
+    try testing.expectEqual(@as(?f64, null), splitRatio(30, 0, true, true));
+    try testing.expectEqual(@as(?f64, 0.3), splitRatio(30, 100, true, true));
+    // after the anchor: the anchor keeps the rest
+    try testing.expectApproxEqAbs(@as(f64, 0.7), splitRatio(30, 100, true, false).?, 1e-9);
+    // never a pane too thin to use, on either side
+    try testing.expectEqual(@as(?f64, 0.05), splitRatio(1, 100, true, true));
+    try testing.expectEqual(@as(?f64, 0.95), splitRatio(400, 100, true, true));
 }

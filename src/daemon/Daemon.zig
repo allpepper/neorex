@@ -279,11 +279,13 @@ fn newPane(self: *Daemon, win: i64) !void {
     const sp = self.changes.splitOf(win);
     // beside the window it came from, else any pane Rex knows
     // a copy: appending below can move every pane
-    const anchor: Pane.RexBlock = blk: {
-        if (self.splitFrom(sp)) |f| if (f.rex_block) |b| break :blk b;
-        for (self.panes.list.items) |q| if (q.layer == null) if (q.rex_block) |b| break :blk b;
+    const anchor: Pane.RexBlock, const anchor_cols: u32 = blk: {
+        if (self.splitFrom(sp)) |f| if (f.rex_block) |b| break :blk .{ b, paneCols(f) };
+        for (self.panes.list.items) |q| if (q.layer == null) if (q.rex_block) |b| break :blk .{ b, paneCols(&q) };
         return; // no anchor yet: next flush
     };
+    // a remembered width (windows.lua): that part of the anchor's space
+    const ratio = WindowChanges.splitRatio(self.changes.widthOf(win), anchor_cols, sp.side_by_side, sp.before);
     // starts at the guess, not Rex's default
     const size = self.newPaneSize(win);
     const pane = try self.panes.addForWindow(self.gpa, win);
@@ -298,6 +300,8 @@ fn newPane(self: *Daemon, win: i64) !void {
         .anchor_id = @as([]const u8, &anchor),
         .direction = if (sp.side_by_side) "horizontal" else "vertical",
         .side = if (sp.before) "before" else "after",
+        // null is left out: Rex's even split
+        .ratio = ratio,
         .layout = .{ .block = .{
             .flavor = "com.superlogical.terminal.shell",
             .label = "neorex",
@@ -358,6 +362,7 @@ fn onNvim(self: *Daemon) !void {
                 .split => |sp| if (self.panes.byWin(sp.win) == null) try self.changes.noteSplit(self.gpa, sp),
                 .title => |t| try self.titles.set(self.gpa, t),
                 .cmdheight => |rows| try self.onCmdheight(rows),
+                .width => |wd| if (self.panes.byWin(wd.win) == null) try self.changes.noteWidth(self.gpa, wd.win, wd.cols),
             };
         },
         .request => |r| try self.nvim.client.respondError(r.id, "neorex serves no requests"),
@@ -492,14 +497,24 @@ fn newWindowSize(self: *const Daemon, win: i64) [2]u32 {
     return .{ size[0], @max(size[1] -| self.nvim.cmd_rows, 1) };
 }
 
-/// A guess at a new split's terminal size, cols x rows: half the pane it splits.
+/// The columns of pane `p`'s terminal, or 0 before it has one.
+fn paneCols(p: *const Pane) u32 {
+    const s = p.terminal_surface orelse return 0;
+    return s.view.cols;
+}
+
+/// A guess at a new split's terminal size, cols x rows: half the pane it
+/// splits, or its remembered width beside it.
 fn newPaneSize(self: *const Daemon, win: i64) [2]u32 {
     const sp = self.changes.splitOf(win);
     const p = self.splitFrom(sp) orelse return rex_default_size;
     const s = p.terminal_surface orelse return rex_default_size;
     const cols = @max(s.view.cols, 1);
     const rows = @max(s.view.rows, 2);
-    if (sp.side_by_side) return .{ @max(cols / 2, 1), rows };
+    if (sp.side_by_side) {
+        if (self.changes.widthOf(win)) |w| return .{ std.math.clamp(w, 1, @max(cols -| 1, 1)), rows };
+        return .{ @max(cols / 2, 1), rows };
+    }
     return .{ cols, @max(rows / 2, 2) };
 }
 

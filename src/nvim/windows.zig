@@ -86,6 +86,14 @@ pub const Note = union(enum) {
     title: Title,
     /// 'cmdheight': the rows each pane keeps for the command line.
     cmdheight: u32,
+    /// A new window's filetype is one whose pane width is remembered: open
+    /// its pane this many columns wide.
+    width: Width,
+};
+
+pub const Width = struct {
+    win: i64,
+    cols: u32,
 };
 
 pub const Title = struct {
@@ -121,11 +129,13 @@ pub fn parseNote(method: []const u8, params: *msgpack.Decoder) !?Note {
         .title
     else if (std.mem.eql(u8, method, "neorex_cmdheight"))
         .cmdheight
+    else if (std.mem.eql(u8, method, "neorex_width"))
+        .width
     else
         return null;
     const want: u32 = switch (tag) {
         .split => 4,
-        .title => 2,
+        .title, .width => 2,
         else => 1,
     };
     if (try rpc.expectArray(params) < want) return error.BadMessage;
@@ -139,6 +149,10 @@ pub fn parseNote(method: []const u8, params: *msgpack.Decoder) !?Note {
         .entered => .{ .entered = win },
         .title => .{ .title = .{ .win = win, .name = try rpc.expectStr(params) } },
         .cmdheight => unreachable,
+        .width => .{ .width = .{
+            .win = win,
+            .cols = std.math.cast(u32, try rpc.expectInt(params)) orelse return error.BadMessage,
+        } },
         .split => .{ .split = .{
             .win = win,
             .side_by_side = try rpc.expectBool(params),
@@ -374,6 +388,11 @@ fn rowStarts(h: *const Harness, win: i64, r: u32, want: []const u8) bool {
     return std.mem.startsWith(u8, Grid.rowText(g, r, &buf), want);
 }
 
+fn gridWidth(h: *const Harness, win: i64) u32 {
+    const g = h.grids.get(h.grids.gridOf(win) orelse return 0) orelse return 0;
+    return g.width;
+}
+
 fn gridHeight(h: *const Harness, win: i64) u32 {
     const g = h.grids.get(h.grids.gridOf(win) orelse return 0) orelse return 0;
     return g.height;
@@ -513,4 +532,100 @@ test "'cmdheight' is reported at setup and when it changes" {
             return lastCmdheight(x) == 2;
         }
     }.f));
+}
+
+/// The last width note for `win`, or 0.
+fn widthFor(h: *const Harness, win: i64) u32 {
+    var i = h.notes.items.len;
+    while (i > 0) {
+        i -= 1;
+        const n = h.notes.items[i];
+        if (n == .width and n.width.win == win) return n.width.cols;
+    }
+    return 0;
+}
+
+test "a remembered filetype's window opens at the width its pane had last" {
+    var buf: [1024]u8 = undefined;
+    var h: Harness = .{ .nvim = Nvim.spawn(testing.io, &.{ "nvim", "--clean", "--embed", "-n" }, &buf) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    } };
+    defer h.deinit();
+    try h.nvim.uiAttach(40, 10, .{ .ext_multigrid = true });
+    h.chan_id = try askChannel(&h.nvim);
+    try h.nvim.flush();
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return x.wins[0] != 0 and x.kind(x.wins[0]) == .external;
+        }
+    }.f));
+
+    // a widths file that has 12 columns for the filetype "remembered"
+    try h.input(":lua vim.g.neorex_widths_file = vim.fn.tempname() .. '/widths.json'; " ++
+        "vim.g.neorex_remember_width = { 'remembered' }; " ++
+        "vim.fn.mkdir(vim.fs.dirname(vim.g.neorex_widths_file), 'p'); " ++
+        "vim.fn.writefile({ vim.json.encode({ remembered = 12 }) }, vim.g.neorex_widths_file)<CR>");
+    try h.input(":vnew | setfiletype remembered<CR>");
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            const cur = x.lastCurrent();
+            return cur != x.wins[0] and widthFor(x, cur) == 12;
+        }
+    }.f));
+    const win = h.lastCurrent();
+
+    // its pane opens: the first size is Rex's answer to the 12 asked, so it
+    // isn't kept; the user's drag to 30 is
+    try adopt(&h.nvim, win, 20, 9);
+    try h.nvim.flush();
+    h.want = win;
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return x.kind(x.want) == .external;
+        }
+    }.f));
+    // Neovim runs typed keys before a pending request: wait for the size
+    try size(&h.nvim, win, 13, 9);
+    try h.nvim.flush();
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return gridWidth(x, x.want) == 13;
+        }
+    }.f));
+    try h.input(":vnew | setfiletype remembered<CR>");
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            const cur = x.lastCurrent();
+            return cur != x.want and widthFor(x, cur) != 0;
+        }
+    }.f));
+    try testing.expectEqual(@as(u32, 12), widthFor(&h, h.lastCurrent()));
+
+    try size(&h.nvim, win, 30, 9);
+    try h.nvim.flush();
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return gridWidth(x, x.want) == 30;
+        }
+    }.f));
+    h.gone = h.lastCurrent();
+    try h.input(":vnew | setfiletype remembered<CR>");
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            const cur = x.lastCurrent();
+            return cur != x.gone and cur != x.want and widthFor(x, cur) != 0;
+        }
+    }.f));
+    try testing.expectEqual(@as(u32, 30), widthFor(&h, h.lastCurrent()));
+
+    // another filetype gets no width
+    try h.input(":vnew | setfiletype other | let g:done = 1<CR>");
+    h.gone = h.lastCurrent();
+    try testing.expect(try h.until(struct {
+        fn f(x: *Harness) bool {
+            return x.lastCurrent() != x.gone;
+        }
+    }.f));
+    try testing.expectEqual(@as(u32, 0), widthFor(&h, h.lastCurrent()));
 }
